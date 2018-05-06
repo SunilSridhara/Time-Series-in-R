@@ -1,0 +1,635 @@
+---
+title: "Assignment9_SunilS"
+author: "Sunil S"
+date: "29 September 2017"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+### Clear the Global Environment
+```{r}
+#rm(list=ls(all=TRUE))
+```
+
+### Load required R library
+```{r}
+library(zoo)
+library(dplyr)
+library(TTR)
+library(forecast)
+library(DMwR)
+
+library(data.table)
+```
+### Read Data from RData
+* Set current working directory
+* Use readRDS function to read RData file
+
+```{r}
+setwd("E:\\INSOFE_CPEE\\Assignments")
+
+data = readRDS("ecommerceData.RData")
+```
+
+### Explore and understand the data
+
+```{r}
+## Dimension of the Data set
+dim(data)
+
+## Look at the summary statistics
+summary(data)
+
+## As it is not very clear, lets look at the first and last 10 records using head and tail commands
+head(data, 10) #default only 6
+tail(data, 10)
+
+## Look into Condition attribute
+table(data$Condition)
+
+## Look into Titlekey attribute
+table(data$TitleKey)
+
+## Find out number of the TitleKeys
+length(unique(data$TitleKey))
+
+## Confirm whether V1 is unique for each of the record
+length(unique(data$V1))
+
+```
+### Drop V1 unnecessary attribute and convert remaining attributes into appropriate type
+```{r}
+data$V1 = NULL
+data$TitleKey = as.factor(data$TitleKey) # need to use as.factor(as.character(data$TitleKey))
+data$Price = as.numeric(data$Price)
+data$Quantity = as.numeric(data$Quantity)
+data$Condition = as.factor(data$Condition)
+data$Date = as.Date(data$Date, format="%Y-%m-%d")
+
+# Summary of the data
+summary(data)
+
+# Re-look at the first 6 records
+head(data)
+
+```
+
+### For this activity, take 4302628 product and records that are in Good Condition.
+
+```{r}
+data = data[data$TitleKey==4302628 & data$Condition=="Good",]
+
+```
+
+### Basic info about that product
+
+```{r}
+summary(data)
+head(data)
+
+data = data[order(data$Date, decreasing=F), ]
+
+head(data,10)
+```
+### Observation & Analysis 
+
+* On the given data, product has multiple prices, so one way is to consider the min price.
+* Use dplyr package to do the same. 
+```{r}
+data = data %>% group_by(Date) %>% summarise("MinPrice" = min(Price))
+## group_by gets data, output of this is given to summarise
+
+data = data.frame(data)
+
+head(data,10)
+```
+
+### Handle missing values 
+* Some times there will be missing entries in dates, which will create a missing day/month/quarter/anual
+
+### Detect missing values
+* Using min and max date in the data, create new date field with continuous sequence of dates 
+* Check Date field in Data against newly created date field and find missing values.
+```{r}
+minDate = min(as.Date(data$Date, format="%Y-%m-%d"))
+maxDate = max(as.Date(data$Date, format="%Y-%m-%d"))
+seq = data.frame("DateRange"=seq(minDate, maxDate, by="days"))
+
+data = seq %>% full_join(data, c("DateRange" = "Date"))
+
+data = data.frame(data)
+rm(minDate, maxDate, seq)
+head(data)
+```
+
+### Impuation of Missing Values
+* Replace the missing values by taking average of it's preceding and succeeding values.
+* For that, use na.locf function in the "zoo" package and rev function
+```{r}
+data$MinPrice = (na.locf(data$MinPrice) +
+                    rev(na.locf(rev(data$MinPrice))))/2
+
+head(data)
+```
+
+### Observation on MinPrice
+* In this data set price is not changing much on daily basis, so it can be aggregated to Week level 
+```{r}
+# Derive Week attribute 
+data$Week = as.numeric(format(data$DateRange, format="%Y.%W"))
+
+data = data %>% group_by(Week) %>% summarise("MinPrice" = min(MinPrice))
+
+data = data.frame(data)
+
+head(data)
+
+```
+
+### Splitting of the Dataset into Train and Test
+* As this data set is time dependent and sequence is important i.e. no random split. 
+```{r}
+train = data[1:(nrow(data) - 4),]
+#in time series, cannot take random values need to maintain the order, sincerequired to predict for 4 weeks in advance, we are taking last 4 weeks as train.
+test = data[(nrow(data) - 3):nrow(data),]
+#rm(data)
+```
+
+### Converting data into R time series object 
+* Our target variable is price
+```{r}
+train = ts(train$MinPrice, frequency =52)
+```
+
+### Vizualize the time series Data
+```{r}
+plot(train, type="l", lwd=3, 
+     xlab="Week", ylab="Price",
+     main="Weekly product price")
+```
+### Decomposed Time Series
+* Decompose will provide more information on seasonality,trend and randomness
+```{r}
+trainDecomposed = decompose(train)
+plot(trainDecomposed)
+rm(trainDecomposed)
+```
+### ACF, PACF plots 
+* Autocorrelation is the linear dependence of a variable with itself at two points in time
+* For stationary processes, autocorrelation between any two observations only depends on the time lag h between them
+*  Partial autocorrelation is the autocorrelation between yt and yt–h after removing any linear dependence on y1,      y2, ..., yt–h+1
+```{r}
+par(mfrow=c(1,2))
+Acf(train,lag=30)
+Pacf(train,lag=30)
+```
+* Looking at the Y scale in ACF we observe that trend is more dominant than seasonality
+* Data is not stationay and we need to stationarize the data
+
+### Stationarize by differencing
+```{r}
+par(mfrow=c(1,3))
+
+plot(diff(train, lag=1), type="l")
+Acf(diff(train,lag=1), lag=30) 
+Pacf(diff(train, lag=1),lag=30)
+
+```
+* ndiffs and nsdiffs functions of forecast package can be used to findout the number of differences and seasonal differences, required to stationarize the data
+```{r}
+ndiffs(train)
+nsdiffs(train)
+```
+
+
+### Modelling  the time series using simple moving averages
+
+```{r}
+fitsma = SMA(train, n=2) #smoothing function, n=2 as ist is NA
+predsma = forecast(fitsma[!is.na(fitsma)], h=4) #forecasting next 4 values
+plot(predsma)
+
+```
+## Assignment 9
+### Build a Linear model on ecommerceData data provided in the lab. Refer to the TimeSeries.R file starting from line 175 and classroom slide no 28. (Both from morning session)
+```{r, echo=T}
+data = data.frame(data)
+data$time =seq(1:262)
+
+lm1 = lm(formula = data$MinPrice ~ data$time)
+lm2 = lm(data$MinPrice ~ poly(data$time, 2, raw=TRUE))
+lm3 = lm(data$MinPrice ~ poly(data$time, 3, raw=TRUE))
+
+plot(data$MinPrice, type="l")
+points(data$time, predict(lm1),type="l", col="red", lwd=2)
+points(data$time, predict(lm2),type="l", col="green", lwd=2)
+points(data$time, predict(lm3),type="l", col="blue", lwd=2)
+
+data$seasonal <- as.factor(rep(c(1:52),times=5,len=262))
+edit(data)
+
+lm1s = lm(MinPrice ~.,data)
+lm2s = lm(MinPrice ~ poly(time, 2, raw=TRUE)+seasonal, data=data)
+lm3s = lm(MinPrice ~ poly(time, 3, raw=TRUE)+seasonal, data=data)
+
+plot(data$MinPrice, type="l")
+points(data$time, predict(lm1s), type="l", col="red", lwd=2)
+
+plot(data$MinPrice, type="l")
+points(data$time, predict(lm2s), type="l", col="blue", lwd=2)
+
+plot(data$MinPrice, type="l")
+points(data$time, predict(lm3s), type="l", col="green", lwd=2)
+
+```
+##Seasonal second approach
+```{r, echo=T}
+str(data)
+datatimeseries = ts(data$MinPrice, frequency =52)
+
+data$mae1 = data$MinPrice/predict(lm1)
+edit(data)
+
+seasonal = tapply(data$mae1,data$seasonal, mean)
+seasonal
+
+dataspr1 = predict(lm1)*rep(seasonal,times=5,len=262)
+
+#plot(data$MinPrice, type="l")
+
+data$mae2 = data$MinPrice-predict(lm1)
+edit(data)
+
+seasonalAdd = tapply(data$mae2,data$seasonal, mean)
+seasonalAdd
+
+dataspr2 = predict(lm1)+rep(seasonalAdd,times=5,len=262)
+
+# Forecasting by Seasonal Naive Method
+#snaivedata = snaive(datatimeseries, h=2*frequency(datatimeseries))
+#datamae1 = data$MinPrice/snaivedata
+#seasonal1 = tapply(data$mae1,data$seasonal1,mean)
+
+#dataspr3 = predict(snaivedata)*rep(seasonal1,times=5,len=262)
+
+plot(data$MinPrice, type="l")
+points(data$time, dataspr1,type="l", col="red", lwd=2)
+points(data$time, dataspr2,type="l", col="blue", lwd=2)
+
+
+```
+##Other forecasting methods
+```{r, echo=T}
+# Simple Forecasting Methods
+datatimeseries
+
+# Forecasting by Average Method
+avdata = meanf(datatimeseries,3)
+
+# Forecasting by Naive Method
+naivedata = naive(datatimeseries,3)
+
+# Forecasting by Seasonal Naive Method
+snaivedata = snaive(datatimeseries, h=2*frequency(datatimeseries))
+
+# Drift Method
+rwfdata = rwf(datatimeseries,3, drift=TRUE)
+
+par(mfrow=c(2,2))
+plot(avdata)
+plot(naivedata)
+plot(snaivedata)
+plot(rwfdata)
+
+#Moving averages for smoothing
+par(mfrow=c(1,1))
+datatimeseries
+plot(datatimeseries)
+
+smadata1 = SMA(datatimeseries, n=1)
+smadata1
+
+wmadata1 = WMA(datatimeseries, n=1)
+wmadata1
+
+emadata1 = EMA(datatimeseries, n=1)
+emadata1
+
+par(mfrow=c(1,1))
+plot(data$MinPrice, type="l", col="black")
+
+lines(smadata1, col="red", lwd=2)
+lines(wmadata1, col="blue")
+lines(emadata1, col="brown")
+
+MAPESMA = mean(abs(datatimeseries[2:262]-smadata1[2:262])/abs(datatimeseries[2:262]))*100
+MAPEWMA = mean(abs(datatimeseries[2:262]-wmadata1[2:262])/abs(datatimeseries[2:262]))*100
+MAPEEMA = mean(abs(datatimeseries[2:262]-emadata1[2:262])/abs(datatimeseries[2:262]))*100
+
+MAPESMA #1.186231e-13
+MAPEWMA #0
+MAPEEMA #0
+```
+
+```{r, echo=T}
+#Effect of K
+
+datatimeseriesSMA3 =  SMA(datatimeseries,n=3)
+
+datatimeseriesSMA8 = SMA(datatimeseries,n=8)
+
+par(mfrow = c(1, 2))
+plot.ts(datatimeseriesSMA3)
+plot.ts(datatimeseriesSMA8)
+
+#With n=8, it is much smoother
+
+
+# Advanced models
+# Holt-Winters
+
+#Moving average without trend and seasonality
+
+par(mfrow = c(1, 1))
+plot(datatimeseries)
+
+dataforecast = HoltWinters(datatimeseries, beta=FALSE,gamma=FALSE)
+
+dataforecast
+dataforecast$fitted
+
+plot(dataforecast)
+dataforecast$SSE
+
+```
+
+```{r, echo=T}
+#Let us now assume there is no seasonality, but there is trend
+
+#We can specify the first value and slope
+
+#Additive, trend and seasonality models
+#miles = read.csv("us-air-carrier-traffic-statistic.csv")
+#miles
+#milestimeseries <- ts(miles, frequency = 12, start = c(1996,1))
+#milestimeseries
+
+dataforecast1 = HoltWinters(datatimeseries)
+dataforecast1
+
+dataforecastMult = HoltWinters(datatimeseries,seasonal = "multiplicative")
+dataforecastMult
+dataforecast1
+dataforecast1$fitted
+
+plot(dataforecast)
+dataforecast$SSE
+dataresiduals <- residuals(dataforecast)
+dataresiduals
+plot(dataresiduals)
+par(mfrow = c(1,2))
+Acf(dataresiduals)
+Pacf(dataresiduals)
+
+```
+
+## Arima model building
+```{r,echo=T}
+rm(data)
+# Model 1
+# Step 1: Plot timeseries (in terms of ARIMA, it is an ARIMA(0,0,0))
+data = readRDS("ecommerceData.RData")
+data
+
+data$V1 = NULL
+data$TitleKey = as.factor(data$TitleKey) # need to use as.factor(as.character(data$TitleKey))
+data$Price = as.numeric(data$Price)
+data$Quantity = as.numeric(data$Quantity)
+data$Condition = as.factor(data$Condition)
+data$Date = as.Date(data$Date, format="%Y-%m-%d")
+
+# Summary of the data
+summary(data)
+
+# Re-look at the first 6 records
+head(data)
+
+data = data[data$TitleKey==4302628 & data$Condition=="Good",]
+data = data %>% group_by(Date) %>% summarise("MinPrice" = min(Price))
+## group_by gets data, output of this is given to summarise
+
+data = data.frame(data)
+
+head(data,10)
+
+#Detect missing values
+minDate = min(as.Date(data$Date, format="%Y-%m-%d"))
+maxDate = max(as.Date(data$Date, format="%Y-%m-%d"))
+seq = data.frame("DateRange"=seq(minDate, maxDate, by="days"))
+
+data = seq %>% full_join(data, c("DateRange" = "Date"))
+
+data = data.frame(data)
+rm(minDate, maxDate, seq)
+head(data)
+#imputation of missing values
+data$MinPrice = (na.locf(data$MinPrice) +
+                    rev(na.locf(rev(data$MinPrice))))/2
+
+head(data)
+# Derive Week attribute 
+data$Week = as.numeric(format(data$DateRange, format="%Y.%W"))
+
+data = data %>% group_by(Week) %>% summarise("MinPrice" = min(MinPrice))
+
+data = data.frame(data)
+
+datatimeseries = ts(data$MinPrice, frequency =52)
+#datatimeseries = ts(data, frequency = 52)
+datatimeseries
+par(mfrow = c(1, 1))
+plot(datatimeseries)
+
+# Step 2: Plot ACF and PACF to get preliminary understanding of the process
+
+par(mfrow = c(1, 2))
+acf(datatimeseries)
+pacf(datatimeseries)
+
+# Step 3: The suspension bridge pattern in ACF suggests both nonstationarity
+# and strong seasonality.  Perform a non-seasonal difference to give an ARIMA(0,1,0) model
+par(mfrow = c(1, 1))
+datatimeseriesdiff1 = diff(datatimeseries, differences = 1)
+datatimeseriesdiff1
+plot(datatimeseriesdiff1)
+
+# Step 4: Check ACF and PACF to explore remaining dependencies
+par(mfrow = c(1, 2))
+acf(datatimeseriesdiff1)
+pacf(datatimeseriesdiff1)
+
+# Step 5: The differenced series looks stationary but has strong seasonal lags
+# Perform a seasonal differencing on the original time series (ARIMA(0,0,0)(0,1,0)12)
+par(mfrow = c(1, 1))
+datatimeseriesseasonaldiff1 = diff(datatimeseries, lag = 12, differences=1)
+datatimeseriesseasonaldiff1
+plot(datatimeseriesseasonaldiff1)
+
+# Step 6: Check ACF and PACF for seasonally differenced data
+#to explore remaining dependencies
+par(mfrow = c(1, 2))
+acf(datatimeseriesseasonaldiff1)
+pacf(datatimeseriesseasonaldiff1)
+
+# Step 7: Strong positive autocorrelation indicates need for either an AR component
+# or a non-seasonal differencing.  Perform a non-seasonal differencing.
+# ARIMA(0,1,0)(0,1,0)12
+par(mfrow = c(1, 1))
+datatimeseriesSeasNoSeasdiff1 = diff(datatimeseriesseasonaldiff1, differences=1)
+datatimeseriesSeasNoSeasdiff1
+plot(datatimeseriesSeasNoSeasdiff1)
+
+# Step 8: Check ACF and PACF to explore remaining dependencies
+par(mfrow = c(1, 2))
+acf(datatimeseriesSeasNoSeasdiff1)
+pacf(datatimeseriesSeasNoSeasdiff1)
+
+# Step 9: ACF and PACF show significant lag-1, which then cutoff, requiring
+# an AR(1) and an MA(1) term.  Also, the significant lag at the seasonal
+# period is negative, requiring a SeasonalMA(1) term
+dataArima1 = Arima(datatimeseries, order = c(1,1,1),seasonal = c(0,1,1), include.drift = FALSE)
+dataArima1
+
+# Step 10: Check residuals to ensure they are white noise
+par(mfrow = c(1, 2))
+acf(dataArima1$residuals, lag.max = 24)
+pacf(dataArima1$residuals, lag.max = 24)
+Box.test(dataArima1$residuals, lag=24, type="Ljung-Box")
+
+#install.packages("forecast")
+#library(forecast)
+# Step 11: Start forecasting
+par(mfrow = c(1, 1))
+
+datatimeseriesforecastsArima1 = forecast(dataArima1,h=36)
+plot(forecast(datatimeseriesforecastsArima1))
+datatimeseriesforecastsArima1
+
+```
+
+
+```{r,echo=T}
+#ARIMA - Model 2
+#Step-by-step ARIMA model building
+# Model 2
+# Step 1: Plot timeseries (in terms of ARIMA, it is an ARIMA(0,0,0))
+data = readRDS("ecommerceData.RData")
+data
+
+data$V1 = NULL
+data$TitleKey = as.factor(data$TitleKey) # need to use as.factor(as.character(data$TitleKey))
+data$Price = as.numeric(data$Price)
+data$Quantity = as.numeric(data$Quantity)
+data$Condition = as.factor(data$Condition)
+data$Date = as.Date(data$Date, format="%Y-%m-%d")
+
+# Summary of the data
+summary(data)
+
+# Re-look at the first 6 records
+head(data)
+
+data = data[data$TitleKey==4302628 & data$Condition=="Good",]
+data = data %>% group_by(Date) %>% summarise("MinPrice" = min(Price))
+## group_by gets data, output of this is given to summarise
+
+data = data.frame(data)
+
+head(data,10)
+
+#Detect missing values
+minDate = min(as.Date(data$Date, format="%Y-%m-%d"))
+maxDate = max(as.Date(data$Date, format="%Y-%m-%d"))
+seq = data.frame("DateRange"=seq(minDate, maxDate, by="days"))
+
+data = seq %>% full_join(data, c("DateRange" = "Date"))
+
+data = data.frame(data)
+rm(minDate, maxDate, seq)
+head(data)
+#imputation of missing values
+data$MinPrice = (na.locf(data$MinPrice) +
+                    rev(na.locf(rev(data$MinPrice))))/2
+
+head(data)
+# Derive Week attribute 
+data$Week = as.numeric(format(data$DateRange, format="%Y.%W"))
+
+data = data %>% group_by(Week) %>% summarise("MinPrice" = min(MinPrice))
+
+data = data.frame(data)
+
+datatimeseries = ts(data$MinPrice, frequency =52)
+#datatimeseries = ts(data, frequency = 52)
+datatimeseries
+par(mfrow = c(1, 1))
+plot(datatimeseries)
+
+# Step 2: Perform a seasonal differencing on the original time series (ARIMA(0,0,0)(0,1,0)12)
+par(mfrow = c(1, 1))
+datatimeseriesseasonaldiff1 =  diff(datatimeseries, lag = 12, differences=1)
+datatimeseriesseasonaldiff1
+plot(datatimeseriesseasonaldiff1)
+
+# Step 3: Check ACF and PACF for seasonally differenced data
+#to explore remaining dependencies
+par(mfrow = c(1, 2))
+acf(datatimeseriesseasonaldiff1)
+pacf(datatimeseriesseasonaldiff1)
+
+# Step 4: Strong positive autocorrelation indicates need for either an AR component
+# or a non-seasonal differencing.  Add an AR term.
+# ARIMA(1,0,0)(0,1,0)12
+dataArima2 = Arima(datatimeseries, order = c(1,0,0),
+                     seasonal = c(0,1,0), include.drift = TRUE)
+dataArima2
+
+# Step 5: Check ACF and PACF to explore remaining dependencies
+par(mfrow = c(1, 2))
+acf(dataArima2$residuals)
+pacf(dataArima2$residuals)
+Box.test(dataArima2$residuals, lag=24, type="Ljung-Box")
+
+# Step 6: Strong negative autocorrelation at the seasonal period
+#indicates need for a seasonal MA term. ARIMA(1,0,0)(0,1,1)12
+dataArima2 = Arima(datatimeseries, order = c(1,0,0),
+                     seasonal = c(0,1,1), include.drift = TRUE)
+dataArima2
+
+# Step 7: Check ACF and PACF to explore remaining dependencies
+par(mfrow = c(1, 2))
+acf(dataArima2$residuals)
+pacf(dataArima2$residuals)
+Box.test(dataArima2$residuals, lag=24, type="Ljung-Box")
+
+# Step 8: Start forecasting
+par(mfrow = c(1, 1))
+datatimeseriesforecastsArima2 = forecast(dataArima2,h=36)
+plot(forecast(datatimeseriesforecastsArima2))
+datatimeseriesforecastsArima2
+
+# Automated functions are available
+dataAutoArima = auto.arima(datatimeseries,ic='aic')
+dataAutoArima
+datatimeseriesforecastsAutoArima = forecast(dataAutoArima,h=36)
+plot(forecast(datatimeseriesforecastsAutoArima))
+datatimeseriesforecastsAutoArima
+
+#MSAutoArima = auto.arima(MStimeseries, ic='aic')
+#MSAutoArima
+#MSforecastsAutoArima = forecast(MSAutoArima,h=36)  
+#plot(forecast(MSforecastsAutoArima))
+#MSforecastsAutoArima
+
+```
